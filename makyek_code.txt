@@ -1,0 +1,993 @@
+#include<stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include<time.h>
+
+// board information
+#define BOARD_SIZE 12
+#define EMPTY 0
+#define BLACK 1
+#define WHITE 2
+
+// bool
+typedef int BOOL;
+#define TRUE 1
+#define FALSE 0
+
+// option
+typedef int OPTION;
+#define UP 0
+#define DOWN 1
+#define LEFT 2
+#define RIGHT 3
+#define UP_LEFT 4
+#define UP_RIGHT 5
+#define DOWN_LEFT 6
+#define DOWN_RIGHT 7
+
+#define MAX_BYTE 10000
+
+#define START "START"
+#define PLACE "PLACE"
+#define TURN  "TURN"
+#define END   "END"
+
+struct Command
+{
+	int x;
+	int y;
+	OPTION option;
+};
+struct Com_score
+{
+	struct Command com;
+	int score;
+};
+struct Chess
+{
+	int x;
+	int y;
+};
+
+//用来破除循环的变量
+BOOL flag = FALSE;
+
+//搜索深度
+#define DEPTH 5
+
+//最后输出的最好的指令
+struct Command bestcom = { 0,0,0 };
+
+//创建搜索用虚拟棋盘
+char chessboard[BOARD_SIZE][BOARD_SIZE] = { 0 };
+
+//存储棋子位置
+struct Chess chess[16] = { 0 };
+
+//时间计数器
+double timestart;
+double timeend;
+
+char board[BOARD_SIZE][BOARD_SIZE] = { 0 };
+int mycolor;
+int othercolor;
+
+//回合计数器
+int num_turn;
+
+//棋局结束的执行方颜色
+int end_color = 0;
+
+//记录变色棋子
+int num_change[DEPTH + 1] = { 0 };
+int colorchange[DEPTH + 1][16][2] = { 0 };
+
+
+//生成当前局面的所有可能着法
+struct Com_score com_score[DEPTH][128] = { 0 };
+
+//实际走子日志
+struct Command move_cookie[121] = { 0 };
+
+//改变搜索顺序
+int Barrk[8] = { 0,1,2,3,4,5,6,7 };
+int Warrk[8] = { 5,7,1,6,4,3,0,2 };
+
+//黑棋5 5凝聚
+int scoreboard_blackx[12] = { 500,320,180,80,20,0,24,96,216,384,600,864 };
+int scoreboard_blacky[12] = { 500,320,180,80,20,0,24,96,216,384,600,864 };
+
+//黑棋6 6凝聚
+int scoreboard_blackx6[12] = { 720,500,320,180,80,20,0,22,88,198,352,550 };
+int scoreboard_blacky6[12] = { 720,500,320,180,80,20,0,22,88,198,352,550 };
+
+//白棋5 5凝聚
+int scoreboard_whitex5[12] = { 600,384,216,96,24,0,20,80,180,320,500,720 };
+int scoreboard_whitey5[12] = { 550,352,198,88,22,0,20,80,180,320,500,720 };
+
+const int DIR[8][2] = { {-1, 0}, {1, 0}, {0, -1}, {0, 1}, {-1, -1}, {-1, 1}, {1, -1}, {1, 1} };
+
+//检验是否出界（宏形式）
+#define isInBound(x, y)   (x >= 0 && x < BOARD_SIZE && y >= 0 && y < BOARD_SIZE)
+
+//估值上限
+#define max 10000000
+
+//检验棋局是否已经结束
+BOOL judge_end(int color)
+{
+	for (int j = 0; j < 16; ++j)
+	{
+		int x = chess[j].x;
+		int y = chess[j].y;
+		if (chessboard[x][y] == color)
+		{
+			for (int k = 0; k < 8; ++k)
+			{
+				if (isInBound(x + DIR[k][0], y + DIR[k][1]) && chessboard[x + DIR[k][0]][y + DIR[k][1]] == EMPTY)
+					return FALSE;
+			}
+		}
+	}
+	return TRUE;
+}
+
+//查找固定坐标的棋子序数
+int  findchess(int x, int y)
+{
+	if (x < 6)
+	{
+		for (int j = 0; j < 16; ++j)
+		{
+			if (chess[j].x == x && chess[j].y == y)
+			{
+				return j;
+			}
+		}
+	}
+	else
+	{
+		for (int j = 15; j >= 0; --j)
+		{
+			if (chess[j].x == x && chess[j].y == y)
+			{
+				return j;
+			}
+		}
+	}
+	return 0;
+}
+
+//搜索时移动棋子并记录棋子移动产生的颜色变化
+void move(struct Command com, int color, int d)
+{
+	//printboard();
+	for (int i = 0; i < 16; ++i)
+	{
+		for (int j = 0; j < 2; ++j)
+			colorchange[d][i][j] = 0;
+	}
+	int new_x, new_y;
+	int k = 0;
+	new_x = com.x + DIR[com.option][0];
+	new_y = com.y + DIR[com.option][1];
+	chessboard[new_x][new_y] = color;
+	chessboard[com.x][com.y] = EMPTY;
+	int j = findchess(com.x, com.y);
+	chess[j].x = new_x;
+	chess[j].y = new_y;
+	int intervention_dir[4][2] = { {1, 0}, {0, 1}, {1, 1}, {1, -1} };
+	for (int i = 0; i < 4; i++)
+	{
+		int x1 = new_x + intervention_dir[i][0];
+		int y1 = new_y + intervention_dir[i][1];
+		int x2 = new_x - intervention_dir[i][0];
+		int y2 = new_y - intervention_dir[i][1];
+		if (isInBound(x1, y1) && isInBound(x2, y2) && chessboard[x1][y1] == 3 - color && chessboard[x2][y2] == 3 - color)
+		{
+			chessboard[x1][y1] = color;
+			chessboard[x2][y2] = color;
+			colorchange[d][k][0] = x1;
+			colorchange[d][k][1] = y1;
+			colorchange[d][k + 1][0] = x2;
+			colorchange[d][k + 1][1] = y2;
+			k += 2;
+		}
+	}
+
+	int custodian_dir[8][2] = { {1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, 1}, {1, -1}, {-1, 1}, {-1, -1} };
+	for (int i = 0; i < 8; i++)
+	{
+		int x1 = new_x + custodian_dir[i][0];
+		int y1 = new_y + custodian_dir[i][1];
+		int x2 = new_x + custodian_dir[i][0] * 2;
+		int y2 = new_y + custodian_dir[i][1] * 2;
+		if (isInBound(x1, y1) && isInBound(x2, y2) && chessboard[x2][y2] == color && chessboard[x1][y1] == 3 - color)
+		{
+			chessboard[x1][y1] = color;
+			colorchange[d][k][0] = x1;
+			colorchange[d][k][1] = y1;
+			k++;
+		}
+	}
+	num_change[d] = k;
+	//printboard();
+}
+
+//还愿搜索时移动棋子造成的影响
+void unmove(struct Command com, int color, int d)
+{
+	int new_x, new_y;
+	new_x = com.x + DIR[com.option][0];
+	new_y = com.y + DIR[com.option][1];
+	chessboard[new_x][new_y] = EMPTY;
+	chessboard[com.x][com.y] = color;
+	int j = findchess(new_x, new_y);
+	chess[j].x = com.x;
+	chess[j].y = com.y;
+	for (int k = 0; k < num_change[d]; ++k)
+	{
+		int x = colorchange[d][k][0];
+		int y = colorchange[d][k][1];
+		chessboard[x][y] = 3 - color;
+	}
+	memset(colorchange[d], 0, sizeof(colorchange[d]));
+	num_change[d] = 0;
+}
+
+//浅排结构体
+void com_sort(int n, int d)
+{
+	struct Com_score midcom = { {0,0,0},0 };
+	for (int i = 0; i < n - 1; ++i)
+		for (int j = i + 1; j < n; ++j)
+			if (com_score[d][i].score < com_score[d][j].score)
+			{
+				midcom = com_score[d][i];
+				com_score[d][i] = com_score[d][j];
+				com_score[d][j] = midcom;
+			}
+}
+
+//对搜索到的局面进行初步评估
+int primer_value(int color)
+{
+	int x, y;
+	int i = 0;
+	int score_gather = 0;
+	int score = 0;
+	int score_mak = 0;
+	int score_yek = 0;
+	for (int j = 0; j < 16; ++j)
+	{
+		if (chessboard[chess[j].x][chess[j].y] == color)
+		{
+			x = chess[j].x;
+			y = chess[j].y;
+			++i;
+
+			//执行棋子凝聚
+			if (num_turn <= 40)
+			{
+				if (color == WHITE)
+				{
+					if (num_turn <= 20)
+					{
+						score_gather += scoreboard_whitex5[x];
+						score_gather += scoreboard_whitey5[y];
+					}
+				}
+				else
+				{
+					if (num_turn < 20)
+					{
+						score_gather += scoreboard_blackx6[x];
+						score_gather += scoreboard_blacky6[y];
+					}
+					else
+					{
+						score_gather += scoreboard_blackx[x];
+						score_gather += scoreboard_blacky[y];
+					}
+
+				}
+			}
+			flag = FALSE;
+
+			//执行方棋子挑夹位
+			for (int k = 7; k >= 0; --k)
+			{
+				if (isInBound(x + 2 * DIR[k][0], y + 2 * DIR[k][1]))
+				{
+					int near_x1 = x + DIR[k][0];
+					int near_y1 = y + DIR[k][1];
+					if (chessboard[x + 2 * DIR[k][0]][y + 2 * DIR[k][1]] == color && chessboard[near_x1][near_y1] == EMPTY)
+					{
+						for (int j = 0; j < 8; ++j)
+						{
+							if (isInBound(near_x1 + DIR[j][0], near_y1 + DIR[j][1]) && chessboard[near_x1 + DIR[j][0]][near_y1 + DIR[j][1]] == 3 - color)
+							{
+								score_yek -= 7100;
+								flag = TRUE;
+								break;
+							}
+						}
+						if (flag) break;
+					}
+				}
+				if (isInBound(x + DIR[k][0], y + DIR[k][1]))
+				{
+					if (chessboard[x + DIR[k][0]][y + DIR[k][1]] == 3 - color)
+					{
+						if (isInBound(x - DIR[k][0], y - DIR[k][1]))
+						{
+							if (chessboard[x - DIR[k][0]][y - DIR[k][1]] == EMPTY)
+							{
+								int near_x = x - DIR[k][0];
+								int near_y = y - DIR[k][1];
+								for (int j = 0; j < 8; ++j)
+								{
+									if (isInBound(near_x + DIR[j][0], near_y + DIR[j][1]))
+										if (chessboard[near_x + DIR[j][0]][near_y + DIR[j][1]] == 3 - color)
+										{
+											score_mak -= 7000;
+											flag = TRUE;
+											break;
+										}
+								}
+							}
+						}
+					}
+				}
+				if (flag) break;
+			}
+		}
+
+		//非执行方棋子挑夹位
+		if (chessboard[chess[j].x][chess[j].y] == 3 - color)
+		{
+			x = chess[j].x;
+			y = chess[j].y;
+			flag = FALSE;
+			for (int k = 7; k >= 0; --k)
+			{
+				if (isInBound(x + 2 * DIR[k][0], y + 2 * DIR[k][1]))
+				{
+					int near_x1 = x + DIR[k][0];
+					int near_y1 = y + DIR[k][1];
+					if (chessboard[x + 2 * DIR[k][0]][y + 2 * DIR[k][1]] == 3 - color && chessboard[near_x1][near_y1] == EMPTY)
+					{
+						score_yek += 300;
+						for (int j = 0; j < 8; ++j)
+						{
+							if (isInBound(near_x1 + DIR[j][0], near_y1 + DIR[j][1]) && chessboard[near_x1 + DIR[j][0]][near_y1 + DIR[j][1]] == color)
+							{
+								score_yek += 3450;
+								flag = TRUE;
+								break;
+							}
+						}
+						if (flag) break;
+					}
+				}
+				if (isInBound(x + DIR[k][0], y + DIR[k][1]))
+				{
+					if (chessboard[x + DIR[k][0]][y + DIR[k][1]] == color)
+					{
+						score_mak += 40;
+						if (isInBound(x - DIR[k][0], y - DIR[k][1]))
+						{
+							if (chessboard[x - DIR[k][0]][y - DIR[k][1]] == EMPTY)
+							{
+								int near_x = x - DIR[k][0];
+								int near_y = y - DIR[k][1];
+								for (int j = 0; j < 8; ++j)
+								{
+									if (isInBound(near_x + DIR[j][0], near_y + DIR[j][1]))
+										if (chessboard[near_x + DIR[j][0]][near_y + DIR[j][1]] == color)
+										{
+											score_mak += 3400;
+											flag = TRUE;
+											break;
+										}
+								}
+							}
+						}
+					}
+				}
+				if (flag) break;
+			}
+		}
+	}
+	score = 30000 * (i - 8) - score_gather + score_mak + score_yek;
+	return score;
+}
+
+//对搜索树最深层次局面进行评估
+int value(int color)
+{
+	int x, y;
+	int i = 0;
+	int score_gather = 0;
+	int score = 0;
+	int score_mak = 0;
+	int score_yek = 0;
+	int dangerchess[16][2] = { 0 };
+	int num_danger = 0;
+
+	for (int j = 0; j < 16; ++j)
+	{
+		if (chessboard[chess[j].x][chess[j].y] == color)
+		{
+			x = chess[j].x;
+			y = chess[j].y;
+			++i;
+			flag = FALSE;
+
+			//执行方（敌方）挑夹位
+			for (int k = 7; k >= 0; --k)
+			{
+				if (isInBound(x + DIR[k][0], y + DIR[k][1]))
+				{
+					int near_x1 = x + DIR[k][0];
+					int near_y1 = y + DIR[k][1];
+					if (chessboard[near_x1][near_y1] == EMPTY)
+					{
+						if (isInBound(near_x1 + DIR[k][0], near_y1 + DIR[k][1]) && chessboard[x + 2 * DIR[k][0]][y + 2 * DIR[k][1]] == color)
+						{
+							for (int j = 0; j < 8; ++j)
+							{
+								if (isInBound(near_x1 + DIR[j][0], near_y1 + DIR[j][1]) && chessboard[near_x1 + DIR[j][0]][near_y1 + DIR[j][1]] == 3 - color)
+								{
+									score_yek -= 3100;
+									dangerchess[num_danger][0] = x;
+									dangerchess[num_danger][1] = y;
+									++num_danger;
+									flag = TRUE;
+									break;
+								}
+							}
+						}
+						else if (isInBound(x - DIR[k][0], y - DIR[k][1]) && chessboard[x - DIR[k][0]][y - DIR[k][1]] == 3 - color)
+						{
+							score_mak -= 40;
+							for (int j = 0; j < 8; ++j)
+							{
+								if (isInBound(near_x1 + DIR[j][0], near_y1 + DIR[j][1]))
+									if (chessboard[near_x1 + DIR[j][0]][near_y1 + DIR[j][1]] == 3 - color)
+									{
+										score_mak -= 3000;
+										dangerchess[num_danger][0] = x;
+										dangerchess[num_danger][1] = y;
+										++num_danger;
+										flag = TRUE;
+										break;
+									}
+							}
+							if (flag) break;
+						}
+					}
+				}
+			}
+
+		}
+
+		if (chessboard[chess[j].x][chess[j].y] == 3 - color)
+		{
+			x = chess[j].x;
+			y = chess[j].y;
+
+			//非执行方（我方）凝聚
+			if (num_turn <= 40)
+			{
+				if (color == WHITE)
+				{
+					if (num_turn <= 20)
+					{
+						score_gather += scoreboard_whitex5[x];
+						score_gather += scoreboard_whitey5[y];
+					}
+				}
+				else
+				{
+					if (num_turn < 20)
+					{
+						score_gather += scoreboard_blackx6[x];
+						score_gather += scoreboard_blacky6[y];
+					}
+					else
+					{
+						score_gather += scoreboard_blackx[x];
+						score_gather += scoreboard_blacky[y];
+					}
+				}
+			}
+			flag = FALSE;
+
+			//非执行方（我方）挑夹位
+			for (int k = 7; k >= 0; --k)
+			{
+				if (isInBound(x + DIR[k][0], y + DIR[k][1]))
+				{
+					int near_x1 = x + DIR[k][0];
+					int near_y1 = y + DIR[k][1];
+					if (chessboard[near_x1][near_y1] == EMPTY)
+					{
+						if (isInBound(x + 2 * DIR[k][0], y + 2 * DIR[k][1]) && chessboard[x + 2 * DIR[k][0]][y + 2 * DIR[k][1]] == 3 - color)
+						{
+							score_yek += 300;
+							for (int j = 0; j < 8; ++j)
+							{
+								if (isInBound(near_x1 + DIR[j][0], near_y1 + DIR[j][1]) && chessboard[near_x1 + DIR[j][0]][near_y1 + DIR[j][1]] == color)
+								{
+									for (int m = 0; m < num_danger; ++m)
+									{
+										if (near_x1 + DIR[j][0] == dangerchess[m][0] && near_y1 + DIR[j][1] == dangerchess[m][1])
+										{
+											score -= 2000;
+											break;
+										}
+									}
+									score_yek += 7100;
+									flag = TRUE;
+									break;
+								}
+							}
+						}
+						else if (isInBound(x - DIR[k][0], y - DIR[k][1]) && chessboard[x - DIR[k][0]][y - DIR[k][1]] == color)
+						{
+							score_mak -= 40;
+							for (int j = 0; j < 8; ++j)
+							{
+								if (isInBound(near_x1 + DIR[j][0], near_y1 + DIR[j][1]))
+								{
+									if (chessboard[near_x1 + DIR[j][0]][near_y1 + DIR[j][1]] == color)
+									{
+										for (int m = 0; m < num_danger; ++m)
+										{
+											if (near_x1 + DIR[j][0] == dangerchess[m][0] && near_y1 + DIR[j][1] == dangerchess[m][1])
+											{
+												score -= 2000;
+												break;
+											}
+										}
+										score_mak += 7000;
+										flag = TRUE;
+										break;
+									}
+								}
+							}
+							if (flag) break;
+						}
+					}
+				}
+			}
+		}
+	}
+	score = 21000 * (i - 8) + score_gather + score_mak + score_yek;
+	return score;
+}
+
+//即将到120回合的结束估值
+int end_value(int color)
+{
+	int num_chess = 0;
+	int score = 0;
+	for (int x = 0; x < BOARD_SIZE; ++x)
+		for (int y = 0; y < BOARD_SIZE; ++y)
+			if (chessboard[x][y] == color)
+				++num_chess;
+	score = 20000 * num_chess;
+	return score;
+}
+
+//负极大值搜索树主体
+int alphabeta(int d, int color, int beta, int alpha, struct Command command, int depth)
+{
+	//下面为我对alphabeta剪枝的所有优化
+
+	/*PVS（主要变例搜索 ；指假设我的着法排序足够好，搜到第一个介于alpha beta之间的着法就默认他为最好的PV结点，
+	然后检验后面的所有节点与当前节点比较，如果比当前结点差则舍弃，比当前节点好则搜索失败，回归正常alphabeta搜索*/
+
+	/*浅层排序：对未达到最深层的搜索局面进行初步评估，根据评估对执行方的有利程度来调整展开结点的顺序，从而达到
+	提升alphabeta剪枝的效率及增加PVS的速度的作用*/
+
+	/*一个棋盘的维护和更新，省下复制棋盘的时间*/
+
+	/*记录棋子位置，每次搜索只遍历棋子，省下搜索空位浪费的时间*/
+
+	/*改变k的搜索顺序，尽量保证搜索以普遍出现频率较高的k顺序来搜，以加速剪枝*/
+
+	//timeout防止超时
+
+	//重复着法检测
+
+
+	BOOL FoundPv = FALSE;
+
+	//对上一层传下来的command进行移动并判断棋局是否结束
+	if (d != 0)
+	{
+		move(command, 3 - color, d);
+		if (d % 2 == 1 && d < depth && judge_end(color) == TRUE)
+		{
+			unmove(command, 3 - color, d);
+			return 1 - max;
+		}
+	}
+
+	//若未结束则展开结点
+	if (d == depth)
+	{
+		//timeout防止超时
+		double time = clock() - timestart;
+		if (time >= 1900)
+			return max - 1;
+		int score;
+		//将是否已经到120步结束的局面分开
+		if (end_color == 0)
+		{
+			score = value(color);
+			unmove(command, 3 - color, d);
+			return score;
+		}
+		else if (end_color)
+		{
+			score = end_value(color);
+			unmove(command, 3 - color, d);
+			return score;
+		}
+	}
+
+	//记录现有棋盘上棋子位置
+	if (d == 0)
+	{
+		int j = 0;
+		for (int x0 = 0; x0 < BOARD_SIZE; ++x0)
+		{
+			for (int y0 = 0; y0 < BOARD_SIZE; ++y0)
+			{
+				if (chessboard[x0][y0] != EMPTY)
+				{
+					chess[j].x = x0;
+					chess[j].y = y0;
+					++j;
+				}
+			}
+		}
+	}
+
+	//最后一层及倒数第二层不适用浅层排序，回到普通的搜索树展开
+	if (d == depth - 1 || d == depth - 2)
+	{
+		struct Command com = { 0,0,0 };
+		int x0, y0, opt0;
+		for (int k = 0; k < 8; ++k)
+		{
+			if (color == BLACK)
+				opt0 = Barrk[k];
+			else
+				opt0 = Warrk[k];
+			for (int j = 0; j < 16; ++j)
+			{
+				if (chessboard[chess[j].x][chess[j].y] == color)
+				{
+					x0 = chess[j].x;
+					y0 = chess[j].y;
+					int new_x = x0 + DIR[opt0][0];
+					int new_y = y0 + DIR[opt0][1];
+					if (isInBound(new_x, new_y) && chessboard[new_x][new_y] == EMPTY)
+					{
+						com.x = x0;
+						com.y = y0;
+						com.option = opt0;
+						int score;
+						score = -alphabeta(d + 1, 3 - color, -alpha, -beta, com, depth);
+						if (score >= beta)
+						{
+							unmove(command, 3 - color, d);
+							return beta;
+						}
+						if (score > alpha)
+						{
+							alpha = score;
+							if (d == 0)
+								bestcom = com;
+						}
+						double time = clock() - timestart;
+						if (time >= 1900)
+							break;
+					}
+				}
+			}
+		}
+		unmove(command, 3 - color, d);
+		return alpha;
+	}
+
+	//当前深度为前三层，先进行浅排再按照排序顺序展开
+	if (d < depth - 2)
+	{
+		struct Command com = { 0,0,0 };
+		int i = 0;
+		memset(com_score[d], 0, sizeof(com_score[d]));
+
+		//搜索k顺序
+		for (int k = 0; k < 8; ++k)
+		{
+			int opt0;
+			if (color == BLACK)
+				opt0 = Barrk[k];
+			else
+				opt0 = Warrk[k];
+
+			//只搜索棋子位置
+			for (int j = 0; j < 16; ++j)
+			{
+				if (chessboard[chess[j].x][chess[j].y] == color)
+				{
+					int x0 = chess[j].x;
+					int y0 = chess[j].y;
+					int new_x = x0 + DIR[opt0][0];
+					int new_y = y0 + DIR[opt0][1];
+					if (isInBound(new_x, new_y) && chessboard[new_x][new_y] == EMPTY)
+					{
+						com.x = x0;
+						com.y = y0;
+						com.option = opt0;
+						move(com, color, d + 1);
+						int score;
+
+						//浅层排序
+						score = primer_value(color);
+						unmove(com, color, d + 1);
+						com_score[d][i].score = score;
+						com_score[d][i].com = com;
+
+						//重复步骤检测
+						if (d == 0)
+						{
+							if (num_turn > 4 && com_score[d][i].com.x == move_cookie[num_turn - 4].x && com_score[d][i].com.y == move_cookie[num_turn - 4].y && com_score[d][i].com.option == move_cookie[num_turn - 4].option)
+								com_score[d][i].score -= 29000;
+							if (num_turn > 8 && com_score[d][i].com.x == move_cookie[num_turn - 8].x && com_score[d][i].com.y == move_cookie[num_turn - 8].y && com_score[d][i].com.option == move_cookie[num_turn - 8].option)
+								com_score[d][i].score -= 5000;
+						}
+						++i;
+					}
+				}
+			}
+		}
+		int n = i;
+
+		//浅排
+		com_sort(n, d);
+		for (i = 0; i < n; ++i)
+		{
+			if (num_turn != 120)
+			{
+				int score;
+
+				//PVS
+				if (FoundPv)
+				{
+					score = -alphabeta(d + 1, 3 - color, -alpha, -alpha - 1, com_score[d][i].com, depth);
+					if (score > alpha && score < beta)
+					{
+						score = -alphabeta(d + 1, 3 - color, -alpha, -beta, com_score[d][i].com, depth);
+					}
+				}
+
+				//常规展开
+				else
+					score = -alphabeta(d + 1, 3 - color, -alpha, -beta, com_score[d][i].com, depth);
+				
+				//重复检测
+				if (d == 0) {
+					if (num_turn > 4 && com_score[d][i].com.x == move_cookie[num_turn - 4].x && com_score[d][i].com.y == move_cookie[num_turn - 4].y && com_score[d][i].com.option == move_cookie[num_turn - 4].option)
+						score -= 20000;
+					if (num_turn > 8 && com_score[d][i].com.x == move_cookie[num_turn - 8].x && com_score[d][i].com.y == move_cookie[num_turn - 8].y && com_score[d][i].com.option == move_cookie[num_turn - 8].option)
+						score -= 20000;
+				}
+				//剪枝
+				if (score >= beta)
+				{
+					unmove(command, 3 - color, d);
+					return beta;
+				}
+				if (score > alpha)
+				{
+					alpha = score;
+					FoundPv = TRUE;
+					if (d == 0)
+						bestcom = com_score[d][i].com;
+				}
+
+				//timeout
+				double time = clock() - timestart;
+				if (time >= 1900)
+					break;
+			}
+			else
+			{
+				bestcom = com_score[d][0].com;
+				break;
+			}
+		}
+		if (d != 0)
+			unmove(command, 3 - color, d);
+		return alpha;
+	}
+	return alpha;
+}
+
+//实际棋盘移动和更新
+void actual_move(struct Command com, int color)
+{
+	int x = com.x;
+	int y = com.y;
+	int option = com.option;
+	int cur_flag = color;
+	int new_x = x + DIR[option][0];
+	int new_y = y + DIR[option][1];
+	board[x][y] = EMPTY;
+	board[new_x][new_y] = cur_flag;
+
+	int cur_other_flag = 3 - cur_flag;
+	int intervention_dir[4][2] = { {1, 0}, {0, 1}, {1, 1}, {1, -1} };
+	for (int i = 0; i < 4; i++)
+	{
+		int x1 = new_x + intervention_dir[i][0];
+		int y1 = new_y + intervention_dir[i][1];
+		int x2 = new_x - intervention_dir[i][0];
+		int y2 = new_y - intervention_dir[i][1];
+		if (isInBound(x1, y1) && isInBound(x2, y2) && board[x1][y1] == cur_other_flag && board[x2][y2] == cur_other_flag)
+		{
+			board[x1][y1] = cur_flag;
+			board[x2][y2] = cur_flag;
+		}
+	}
+	int custodian_dir[8][2] = { {1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, 1}, {1, -1}, {-1, 1}, {-1, -1} };
+	for (int i = 0; i < 8; i++)
+	{
+		int x1 = new_x + custodian_dir[i][0];
+		int y1 = new_y + custodian_dir[i][1];
+		int x2 = new_x + custodian_dir[i][0] * 2;
+		int y2 = new_y + custodian_dir[i][1] * 2;
+		if (isInBound(x1, y1) && isInBound(x2, y2) && board[x2][y2] == cur_flag && board[x1][y1] == cur_other_flag)
+		{
+			board[x1][y1] = cur_flag;
+		}
+	}
+	//printBoard();
+}
+
+//开局初始化棋盘
+void start(int flag)
+{
+	memset(board, 0, sizeof(board));
+
+	for (int i = 0; i < 3; i++) {
+		board[2][2 + i] = WHITE;
+		board[6][6 + i] = WHITE;
+		board[5][3 + i] = BLACK;
+		board[9][7 + i] = BLACK;
+	}
+
+	for (int i = 0; i < 2; i++) {
+		board[8 + i][2] = WHITE;
+		board[2 + i][9] = BLACK;
+	}
+	memcpy(chessboard, board, sizeof(board));
+}
+
+
+int main()
+{
+	num_turn = 0;
+	char ch[10];
+	struct Command com = { 0,0,0 };
+	while (1)
+	{
+		end_color = 0;
+		memset(ch, 0, sizeof(char));
+		int x, y, opt;
+		scanf("%s", ch);
+		//printBoard();
+		if (strcmp(ch, START) == 0)
+		{
+			scanf("%d", &mycolor);
+			othercolor = 3 - mycolor;
+			start(mycolor);
+			printf("OK\n");
+			fflush(stdout);
+		}
+		else if (strcmp(ch, PLACE) == 0)
+		{
+			scanf("%d %d %d", &x, &y, &opt);
+			struct Command com = { x,y,opt };
+			actual_move(com, othercolor);
+			move_cookie[num_turn] = com;
+		}
+		else if (strcmp(ch, TURN) == 0)
+		{
+			timestart = clock();
+			memcpy(chessboard, board, sizeof(board));
+
+			//接近120步时按结尾处理
+			if (num_turn == 120 && mycolor == WHITE)
+			{
+				end_color = 2;
+				alphabeta(0, mycolor, max, -max, com, 1);
+			}
+			else if (num_turn == 119 && mycolor == BLACK)
+			{
+				end_color = 1;
+				alphabeta(0, mycolor, max, -max, com, 2);
+			}
+			else if (num_turn == 118 && mycolor == WHITE)
+			{
+				end_color = 2;
+				alphabeta(0, mycolor, max, -max, com, 3);
+			}
+			else if (num_turn == 117 && mycolor == BLACK)
+			{
+				end_color = 1;
+				alphabeta(0, mycolor, max, -max, com, 4);
+			}
+
+			//特殊情况的简易开局库
+			else if (num_turn == 1 && mycolor == BLACK)
+			{
+				bestcom.x = 9; bestcom.y = 7; bestcom.option = 4;
+			}
+			else if (num_turn == 2 && mycolor == WHITE)
+			{
+				if (board[9][7] == BLACK && board[9][8] == BLACK && board[9][9] == BLACK) {
+					bestcom.x = 2; bestcom.y = 4; bestcom.option = 7;
+				}
+				else if (move_cookie[1].x == 9 && move_cookie[1].y == 7 && move_cookie[1].option == 4) {
+					bestcom.x = 6; bestcom.y = 8; bestcom.option = 6;
+				}
+				else if (move_cookie[1].x == 9 && move_cookie[1].y == 7 && move_cookie[1].option == 0) {
+					bestcom.x = 6; bestcom.y = 8; bestcom.option = 6;
+				}
+				else if (move_cookie[1].x == 9 && move_cookie[1].y == 8 && move_cookie[1].option == 4)
+				{
+					bestcom.x = 6; bestcom.y = 7; bestcom.option = 1;
+				}
+				else if (move_cookie[1].x == 9 && move_cookie[1].y == 8 && move_cookie[1].option == 0)
+				{
+					bestcom.x = 6; bestcom.y = 7; bestcom.option = 7;
+				}
+				else alphabeta(0, mycolor, max, -max, com, DEPTH);
+			}
+			else if (num_turn == 3 && mycolor == BLACK)
+			{
+				if (move_cookie[2].x == 6 && move_cookie[2].y == 8 && move_cookie[2].option == 1)
+				{
+					bestcom.x = 9; bestcom.y = 9; bestcom.option = 0;
+				}
+				else if (move_cookie[2].x == 6 && move_cookie[2].y == 8 && move_cookie[2].option == 6)
+				{
+					bestcom.x = 9; bestcom.y = 8; bestcom.option = 5;
+				}
+				else
+				{
+					bestcom.x = 3; bestcom.y = 9; bestcom.option = 6;
+				}
+			}
+			else alphabeta(0, mycolor, max, -max, com, DEPTH);
+			actual_move(bestcom, mycolor);
+			move_cookie[num_turn] = bestcom;
+			printf("%d %d %d\n", bestcom.x, bestcom.y, bestcom.option);
+			fflush(stdout);
+		}
+		else
+		{
+			int end;
+			scanf("%d", &end);
+		}
+		num_turn++;
+	}
+	return 0;
+}
